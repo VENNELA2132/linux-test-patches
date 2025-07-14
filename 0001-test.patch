@@ -1,0 +1,83 @@
+From c0ce04e31424b44c4a9cdf03ee6bcc56a323ea44 Mon Sep 17 00:00:00 2001
+From: Erni Sri Satya Vennela <ernis@lilnux.microsoft.com>
+Date: Mon, 23 Jun 2025 12:05:20 +0000
+Subject: [PATCH] test
+
+---
+ drivers/net/ethernet/microsoft/mana/mana_en.c | 24 +++++++++++++++++++
+ include/net/mana/mana.h                       |  3 +++
+ 2 files changed, 27 insertions(+)
+
+diff --git a/drivers/net/ethernet/microsoft/mana/mana_en.c b/drivers/net/ethernet/microsoft/mana/mana_en.c
+index ccd2885c939e..957e91b6d7f9 100644
+--- a/drivers/net/ethernet/microsoft/mana/mana_en.c
++++ b/drivers/net/ethernet/microsoft/mana/mana_en.c
+@@ -471,6 +471,8 @@ static void mana_get_stats64(struct net_device *ndev,
+ 
+ 	netdev_stats_to_stats64(st, &ndev->stats);
+ 
++	st->rx_missed_errors = apc->eth_stats.hc_rx_discards_no_wqe;
++
+ 	for (q = 0; q < num_queues; q++) {
+ 		rx_stats = &apc->rxqs[q]->stats;
+ 
+@@ -741,6 +743,9 @@ static void mana_cleanup_port_context(struct mana_port_context *apc)
+ 	apc->mana_port_debugfs = NULL;
+ 	kfree(apc->rxqs);
+ 	apc->rxqs = NULL;
++	cancel_delayed_work_sync(&apc->gf_stats_work);
++	destroy_workqueue(apc->gf_stats_wq);
++	apc->gf_stats_wq = NULL;
+ }
+ 
+ static void mana_cleanup_indir_table(struct mana_port_context *apc)
+@@ -2847,6 +2852,18 @@ int mana_detach(struct net_device *ndev, bool from_close)
+ 	return 0;
+ }
+ 
++#define MANA_GF_STATS_PERIOD msecs_to_jiffies(2000)
++
++static void mana_gf_stats_work_handler(struct work_struct *work)
++{
++	struct mana_port_context *apc =
++		container_of(to_delayed_work(work), struct mana_port_context, gf_stats_work);
++
++	mana_query_gf_stats(apc);
++
++	queue_delayed_work(apc->gf_stats_wq, &apc->gf_stats_work, MANA_GF_STATS_PERIOD);
++}
++
+ static int mana_probe_port(struct mana_context *ac, int port_idx,
+ 			   struct net_device **ndev_storage)
+ {
+@@ -2891,6 +2908,13 @@ static int mana_probe_port(struct mana_context *ac, int port_idx,
+ 
+ 	netdev_rss_key_fill(apc->hashkey, MANA_HASH_KEY_SIZE);
+ 
++	apc->gf_stats_wq = create_singlethread_workqueue("mana_gf_stats");
++	if (!apc->gf_stats_wq)
++		return -ENOMEM;
++
++	INIT_DELAYED_WORK(&apc->gf_stats_work, mana_gf_stats_work_handler);
++	queue_delayed_work(apc->gf_stats_wq, &apc->gf_stats_work, MANA_GF_STATS_PERIOD);
++
+ 	err = mana_init_port(ndev);
+ 	if (err)
+ 		goto free_net;
+diff --git a/include/net/mana/mana.h b/include/net/mana/mana.h
+index 9abb66461211..42cf048ab20d 100644
+--- a/include/net/mana/mana.h
++++ b/include/net/mana/mana.h
+@@ -467,6 +467,9 @@ struct mana_port_context {
+ 	struct mutex vport_mutex;
+ 	int vport_use_count;
+ 
++	struct workqueue_struct *gf_stats_wq;
++	struct delayed_work gf_stats_work;
++
+ 	u16 port_idx;
+ 
+ 	bool port_is_up;
+-- 
+2.34.1
+
